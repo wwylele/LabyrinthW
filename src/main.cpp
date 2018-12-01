@@ -20,7 +20,6 @@
 #include <array>
 
 struct Object {
-    int model_id;
     Eigen::Projective3f linear = Eigen::Projective3f::Identity();
     Eigen::Projective3f translate = Eigen::Projective3f::Identity();
     Eigen::Vector3f color = Eigen::Vector3f(1.0f, 1.0f, 1.0f);
@@ -58,19 +57,6 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     {
     case GLFW_KEY_1: {
         Object object;
-        object.model_id = 0;
-        objects.push_back(object);
-        break;
-    }
-    case GLFW_KEY_2: {
-        Object object;
-        object.model_id = 1;
-        objects.push_back(object);
-        break;
-    }
-    case GLFW_KEY_3: {
-        Object object;
-        object.model_id = 2;
         objects.push_back(object);
         break;
     }
@@ -149,11 +135,11 @@ Eigen::Vector3f GetCameraPos() {
     return camera;
 }
 
-std::tuple<Eigen::Projective3f, Eigen::Projective3f> GetCameraMatrix() {
+Eigen::Projective3f GetCameraMatrix() {
     Eigen::Vector3f camera = GetCameraPos();
-    auto cam = CameraTransform(camera);
+    auto camera_tran = CameraTransform(camera);
     auto proj = Perspective(0.5f, 0.5f * y_over_x, 1.0f, 1000.0f);
-    return std::make_tuple(cam, proj);
+    return proj * camera_tran;
 }
 
 
@@ -175,9 +161,8 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
         Eigen::Vector4f e{(float)x, (float)y, -1.0f, 1.0f};
         Eigen::Vector4f d{0.0f, 0.0f, 1.0f, 0.0f};
         Eigen::Vector4f e1d = e + d;
-        Eigen::Projective3f cam, proj;
-        std::tie(cam, proj) = GetCameraMatrix();
-        Eigen::Matrix4f rev = (proj * cam).inverse().matrix();
+        Eigen::Projective3f camera_tran = GetCameraMatrix();
+        Eigen::Projective3f rev = camera_tran.inverse();
         e = rev * e;
         e1d = rev * e1d;
 
@@ -186,7 +171,7 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
         float mt;
         for (std::size_t i = 0; i < objects.size(); ++i) {
             auto& object = objects[i];
-            Eigen::Matrix4f local_rev = (object.translate * object.linear).inverse().matrix();
+            Eigen::Projective3f local_rev = (object.translate * object.linear).inverse();
             Eigen::Vector4f le = local_rev * e;
             Eigen::Vector4f le1d = local_rev * e1d;
             Eigen::Vector3f re = Eigen::Vector3f(le(0), le(1), le(2)) / le(3);
@@ -196,7 +181,7 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
             // Sphere approximation
             float a = rd.dot(rd);
             float b = 2 * rd.dot(re);
-            float c = re.dot(re) - 3;
+            float c = re.dot(re) - 1;
             float det = b * b - 4 * a * c;
             if (det < 0.0)
                 continue; //  Don't botther checking triangles if the sphere test fails
@@ -280,18 +265,14 @@ int main(void)
 #version 150 core
 
 uniform vec3 obj_color;
-uniform mat4 obj_transform;
-
-uniform mat4 cam;
-uniform mat4 proj;
+uniform vec3 camera_pos;
+uniform mat4 obj_tran;
+uniform mat4 inv_obj;
+uniform mat4 camera_tran;
 
 out vec3 vert_color;
-//out vec3 view;
-out vec3 light;
-//out vec3 normal;
-out vec3 xyw;
-
-const vec4 light_source = vec4(10.0, 10.0, 10.0, 1.0);
+out vec3 e; // ray origin in object space
+out vec3 d; // ray direction in objct space
 
 const vec3 ijk[3] = vec3[3](vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 1.0));
 
@@ -306,8 +287,6 @@ void main()
         ijk[axis], ijk[(axis + 1) % 3], ijk[(axis + 2) % 3]
     );
 
-    vec3 inter_normal = perm[0] * negate;
-
     vec3 position;
     if (in_face_id == 0 || in_face_id == 3) {
         position = (perm[0] + perm[1] + perm[2]) * negate;
@@ -319,24 +298,14 @@ void main()
         position = perm[0] * negate + perm[1] - perm[2];
     }
 
-    vec4 in_normal;
-    in_normal = vec4(inter_normal, 0.0);
+    e = (inv_obj * vec4(camera_pos, 1.0)).xyz;
+    d = position - e;
+
     vert_color = obj_color;
 
-    vec4 world_pos = obj_transform * vec4(position, 1.0);
-    vec4 world_normal = transpose(inverse(obj_transform)) * in_normal;
+    vec4 world_pos = obj_tran * vec4(position, 1.0);
+    vec4 proj_pos = camera_tran * world_pos;
 
-    vec4 view_pos = cam * world_pos;
-    vec4 view_light = cam * light_source;
-    //vec4 view_normal = transpose(inverse(cam)) * world_normal;
-
-    //view = -view_pos.xyz;
-    //normal = view_normal.xyz;
-    light = (view_light - view_pos).xyz;
-
-    vec4 proj_pos = proj * view_pos;
-
-    xyw = proj_pos.xyw;
     gl_Position = proj_pos;
 }
 )";
@@ -344,29 +313,20 @@ void main()
 #version 150 core
 
 in vec3 vert_color;
-//in vec3 view;
-in vec3 light;
-//in vec3 normal;
-in vec3 xyw;
+in vec3 e;
+in vec3 d;
 
 out vec4 outColor;
 
-uniform mat4 obj_transform;
-uniform mat4 cam;
-uniform mat4 proj;
-uniform mat4 inv;
+uniform vec3 camera_pos;
+uniform mat4 obj_tran;
+uniform mat4 inv_obj;
+uniform mat4 camera_tran;
+
+const vec3 light_source = vec3(10.0, 10.0, 10.0);
 
 void main()
 {
-    vec2 xy = xyw.xy / xyw.z;
-
-    vec4 ve = vec4(xy, -1.0, 1.0);
-    vec4 vd = ve + vec4(0.0, 0.0, 2.0, 0.0);
-    ve = inv * ve;
-    vd = inv * vd;
-    vec3 e = ve.xyz / ve.w;
-    vec3 d = vd.xyz / vd.w - e;
-
     float a = dot(d, d);
     float b = 2 * dot(d, e);
     float c = dot(e, e) - 1;
@@ -374,25 +334,23 @@ void main()
     if (det < 0.0)
         discard;
 
-    det = sqrt(det);
-
-    float t = (-b - det) / (2.0 * a);
+    float t = (-b - sqrt(det)) / (2.0 * a);
     if (t < 0.0)
         discard;
 
-
     vec3 p = e + d * t;
-    vec4 p_view = cam * obj_transform * vec4(p, 1.0);
-    vec4 n_view = cam * obj_transform * vec4(p, 0.0);
-    vec4 p_proj = proj * p_view;
+
+    vec4 p_world = obj_tran * vec4(p, 1.0);
+    vec4 n_world = transpose(inv_obj) * vec4(p, 0.0);
+    vec4 p_proj = camera_tran * p_world;
     gl_FragDepth = p_proj.z / p_proj.w * 0.5 + 0.5;
 
-    vec3 v = normalize(-p_view.xyz);
-    vec3 l = normalize(light);
-    vec3 n = normalize(n_view.xyz);
+    vec3 v = normalize(camera_pos - p_world.xyz);
+    vec3 l = normalize(light_source - p_world.xyz);
+    vec3 n = normalize(n_world.xyz);
     vec3 h = normalize(l + v);
-    vec3 diffuse = vert_color * 0.5 * max(0.0, dot(n, l));
-    vec3 specular = vert_color * pow(max(0.0, dot(n, h)), 10);
+    vec3 diffuse = vert_color * 0.8 * max(0.0, dot(n, l));
+    vec3 specular = vert_color * pow(max(0.0, dot(n, h)), 50);
     outColor = vec4(clamp(diffuse + specular + vert_color * 0.05, 0.0, 1.0), 1.0);
 }
 )";
@@ -420,10 +378,10 @@ void main()
     glEnable(GL_DEPTH_TEST);
 
     int uniform_vert_color = program.uniform("obj_color");
-    int uniform_obj_transform = program.uniform("obj_transform");
-    int uniform_cam = program.uniform("cam");
-    int uniform_proj = program.uniform("proj");
-    int uniform_inv = program.uniform("inv");
+    int uniform_obj_tran = program.uniform("obj_tran");
+    int uniform_camera_tran = program.uniform("camera_tran");
+    int uniform_inv_obj = program.uniform("inv_obj");
+    int uniform_camera_pos = program.uniform("camera_pos");
 
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
@@ -546,20 +504,20 @@ void main()
         glClearDepth(1.0f);
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
 
-        Eigen::Projective3f cam, proj;
-        std::tie(cam, proj) = GetCameraMatrix();
+        Eigen::Projective3f camera_tran = GetCameraMatrix();
+        Eigen::Vector3f camera_pos = GetCameraPos();
 
-        glUniformMatrix4fv(uniform_cam, 1, GL_FALSE, cam.data());
-        glUniformMatrix4fv(uniform_proj, 1, GL_FALSE, proj.data());
+        glUniformMatrix4fv(uniform_camera_tran, 1, GL_FALSE, camera_tran.data());
+        glUniform3fv(uniform_camera_pos, 1, camera_pos.data());
 
         for (std::size_t i = 0; i < objects.size(); ++i) {
             auto& object = objects[i];
 
-            Eigen::Projective3f obj_transform = object.translate * object.linear;
-            glUniformMatrix4fv(uniform_obj_transform, 1, GL_FALSE, obj_transform.data());
+            Eigen::Projective3f obj_tran = object.translate * object.linear;
+            glUniformMatrix4fv(uniform_obj_tran, 1, GL_FALSE, obj_tran.data());
 
-            Eigen::Projective3f inv = (proj * cam * obj_transform).inverse();
-            glUniformMatrix4fv(uniform_inv, 1, GL_FALSE, inv.data());
+            Eigen::Projective3f inv = obj_tran.inverse();
+            glUniformMatrix4fv(uniform_inv_obj, 1, GL_FALSE, inv.data());
 
             glUniform3fv(uniform_vert_color, 1, object.color.data());
             glDrawArrays(GL_TRIANGLES, 0, 36);
