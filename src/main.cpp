@@ -18,6 +18,15 @@
 #include <tuple>
 #include <thread>
 #include <array>
+#include <cmath>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
+#include "sphere.h"
+#include "box.h"
+#include "disk.h"
+#include "cylinder.h"
 
 struct Object {
     Eigen::Projective3f linear = Eigen::Projective3f::Identity();
@@ -45,9 +54,24 @@ const std::array<Eigen::Vector3f, 10> color_table{{
 }};
 
 const float pi = 3.14159265359;
-float camera_r = 5.0f;
-float camera_theta = 0.0f;
+float camera_r = 50.0f;
+float camera_theta = pi / 2;
 float camera_phi = pi / 2;
+
+
+
+Eigen::Vector2d tilt{0.0, 0.0};
+
+Eigen::Vector2d reset_ball_p{14, 14}, reset_ball_v{0.0, 0.0};
+Eigen::Vector2d ball_p = reset_ball_p, ball_v = reset_ball_v;
+
+constexpr double ball_r = 1.0;
+
+bool falling = false;
+std::size_t falling_hole;
+double falling_distance;
+double falling_angle;
+double falling_av, falling_rv;
 
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods)
 {
@@ -55,6 +79,11 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         return;
     switch (key)
     {
+    case GLFW_KEY_ENTER:
+        falling = false;
+        ball_p = reset_ball_p;
+        ball_v = reset_ball_v;
+        break;
     case GLFW_KEY_1: {
         Object object;
         objects.push_back(object);
@@ -205,6 +234,261 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
     }
 }
 
+
+
+constexpr float BoardXScale = 20.0f;
+constexpr float BoardYScale = 20.0f;
+constexpr float BoardZScale = 1.0f;
+
+struct Box {
+    float x_scale = 1.0f;
+    float y_scale = 1.0f;
+    float x_pos = 1.0f;
+    float y_pos = 1.0f;
+    float rotation = 0.0f;
+
+    Box(float x_scale, float y_scale, float x_pos, float y_pos, float rotation):
+        x_scale(x_scale), y_scale(y_scale), x_pos(x_pos), y_pos(y_pos), rotation(rotation) {}
+
+    Eigen::Affine3f GetMatrix() const {
+        Eigen::Affine3f tran = Eigen::Affine3f::Identity();
+        tran = Eigen::Scaling(x_scale, y_scale, BoardZScale) * tran;
+        tran = Eigen::AngleAxisf(rotation, Eigen::Vector3f(0.0, 0.0, 1.0f)) * tran;
+        tran = Eigen::Translation3f(x_pos, y_pos, BoardZScale) * tran;
+        return tran;
+    }
+};
+
+std::vector<Box> boxes {
+    Box{1.0f, 10.0f, 11.0f, 5.0f, 0.0f},
+    Box{8.0f, 0.2f, 8.0f, -13.0f, 0.0f},
+    Box{8.0f, 0.8f, 4.0f, -7.0f, 1.0f},
+    Box{4.0f, 0.4f, -2.0f, -10.4f, 0.0f},
+    Box{0.6f, 12.0f, -7.0f, -0.0f, 0.0f},
+
+    Box{0.2f, 0.3f, -10.0f, -10.2f, 0.0f},
+    Box{0.3f, 0.1f, -16.0f, -9.8f, 0.0f},
+    Box{0.3f, 0.3f, -9.5f, -8.4f, 0.0f},
+    Box{0.2f, 0.2f, -13.0f, -7.4f, 0.0f},
+    Box{0.4f, 0.3f, -11.2f, -5.5f, 0.0f},
+    Box{0.2f, 0.3f, -17.4f, -3.9f, 0.0f},
+    Box{0.2f, 0.1f, -15.1f, -1.4f, 0.0f},
+    Box{0.3f, 0.3f, -11.9f, 1.8f, 0.0f},
+    Box{0.2f, 0.2f, -9.7f, 3.3f, 0.0f},
+    Box{0.3f, 0.3f, -13.7f, 4.8f, 0.0f},
+    Box{0.4f, 0.2f, -10.4f, 6.8f, 0.0f},
+    Box{0.3f, 0.3f, -16.6f, 7.6f, 0.0f},
+    Box{0.2f, 0.1f, -15.1f, 10.5f, 0.0f},
+    Box{0.1f, 0.3f, -13.1f, 12.7f, 0.0f},
+    Box{0.2f, 0.1f, -12.8f, 11.0f, 0.0f},
+
+    Box{7.5f, 1.0f, 0.0f, 13.5f, 0.0f},
+
+    Box{2.5f, 0.2f, 0.0f, 7.0f, 0.2f},
+    Box{2.5f, 0.2f, 0.0f, -1.0f, 0.2f},
+    Box{0.2f, 2.5f, 4.0f, 3.0f, 0.2f},
+    Box{0.2f, 2.5f, -4.0f, 3.0f, 0.2f},
+};
+
+std::vector<Eigen::Vector2d> holes {
+    {0.0, 3.0},
+    {2.0, 2.0},
+    {-2.0, 4.0},
+
+    {11.0, 16.5},
+    {17.0, -9.0},
+    {15.0, -9.6},
+    {13.0, -10.2},
+    {11.0, -10.8},
+    {5.0, -17},
+    {-5.0, -17},
+    {-5.0, -12},
+
+    {-11.0, -1.0},
+};
+
+void AddEdges() {
+    boxes.push_back(Box(1.0f, BoardYScale - 2.0f, BoardXScale - 1.0f, 0.0f, 0.0f));
+    boxes.push_back(Box(1.0f, BoardYScale - 2.0f, -BoardXScale + 1.0f, 0.0f, 0.0f));
+    boxes.push_back(Box(BoardXScale, 1.0f, 0.0f, BoardYScale - 1.0f, 0.0f));
+    boxes.push_back(Box(BoardXScale,1.0f, 0.0f, -BoardYScale + 1.0f, 0.0f));
+}
+
+void move_callback(GLFWwindow* window, double xpos, double ypos) {
+    // Get the size of the window
+    int width, height;
+    glfwGetWindowSize(window, &width, &height);
+
+    xpos -= width / 2.0;
+    ypos -= height / 2.0;
+
+    int unit = std::max(width, height) / 2.0;
+
+    tilt = -Eigen::Vector2d{xpos, ypos} / unit * 0.3;
+}
+
+Eigen::Affine3f GetBallMatrix() {
+    double delta = ball_r;
+    if (falling) {
+        if (falling_distance <= 0.0) {
+            delta = -ball_r;
+        } else {
+            double a = ball_r - falling_distance;
+            delta = std::sqrt(ball_r * ball_r - a * a);
+        }
+    }
+
+    return Eigen::Translation3f((float)ball_p(0), (float)ball_p(1), (float)delta)
+     * Eigen::Scaling((float)ball_r, (float)ball_r, (float)ball_r) ;
+}
+
+std::tuple<double, Eigen::Vector2d> PointToSegment(Eigen::Vector2d p, Eigen::Vector2d a, Eigen::Vector2d b) {
+    Eigen::Vector2d ap = p - a;
+    Eigen::Vector2d ab = b - a;
+    float f = ap.dot(ab) / ab.dot(ab);
+    if (f <= 0.0 || f >= 1.0)
+        return std::make_tuple<double, Eigen::Vector2d>(10000.0f, {});
+    return std::make_tuple<double, Eigen::Vector2d>((ap - ab * f).norm(), a + ab * f);
+}
+
+Eigen::Vector2d ProjectVector(Eigen::Vector2d v, Eigen::Vector2d a, Eigen::Vector2d b) {
+    Eigen::Vector2d ab = b - a;
+    return  v.dot(ab) / ab.dot(ab) * ab;
+}
+
+void StepFrame() {
+    const double dt = 0.1;
+
+    if (falling) {
+        if (falling_distance <= 0.0) {
+            falling_distance = 0.0;
+            ball_p = holes[falling_hole];
+            return;
+        }
+
+        falling_distance -= dt * falling_rv;
+        falling_angle += dt * falling_av;
+        ball_p = holes[falling_hole] + falling_distance *
+            Eigen::Vector2d(std::cos(falling_angle), std::sin(falling_angle));
+        return;
+    }
+
+    Eigen::Vector2d ball_a = tilt.normalized() * std::sin(tilt.norm());
+
+    ball_v += ball_a * dt;
+
+    Eigen::Vector2d new_p = ball_p + ball_v * dt;
+
+    // filter v
+
+    bool detected = false;
+    for (Box& box : boxes) {
+        bool collide = false;
+        Eigen::Vector4d v[4]{
+            {1.0, 1.0, 0.0, 1.0},
+            {1.0, -1.0, 0.0, 1.0},
+            {-1.0, -1.0, 0.0, 1.0},
+            {-1.0, 1.0, 0.0, 1.0},
+        };
+
+        Eigen::Affine3d tran = box.GetMatrix().cast<double>();
+        Eigen::Vector4d vv[4] {
+            tran * v[0],
+            tran * v[1],
+            tran * v[2],
+            tran * v[3],
+        };
+
+        Eigen::Vector2d a[4] {
+            {vv[0](0), vv[0](1)},
+            {vv[1](0), vv[1](1)},
+            {vv[2](0), vv[2](1)},
+            {vv[3](0), vv[3](1)},
+        };
+
+        Eigen::Vector2d b[4] {
+            a[1],
+            a[2],
+            a[3],
+            a[0],
+        };
+
+        for (int i = 0; i < 4; ++i) {
+            float p, q;
+            Eigen::Vector2d pg, qg;
+            std::tie(p, pg) = PointToSegment(ball_p, a[i], b[i]);
+            std::tie(q, qg) = PointToSegment(new_p, a[i], b[i]);
+            if (p <= ball_r && q < p) {
+                ball_p += (ball_r - p) / p * (ball_p - pg);
+
+                if (detected) {
+                    ball_v = {0.0, 0.0};
+                    goto outer;
+                }
+
+                Eigen::Vector2d ab = b[i] - a[i];
+                ball_v = ProjectVector(ball_v, a[i], b[i]);
+
+                collide = true;
+            }
+        }
+
+        for (int i = 0; i < 4; ++i) {
+            Eigen::Vector2d ap = ball_p - a[i];
+            Eigen::Vector2d aq = new_p - a[i];
+            if (ap.norm() <= ball_r && aq.norm() < ap.norm()) {
+                if (detected) {
+                    ball_v = {0.0, 0.0};
+                    goto outer;
+                }
+
+                Eigen::Vector2d ar = Eigen::Rotation2Dd(pi / 2) * ap;
+                ball_v = ProjectVector(ball_v, {0.0, 0.0}, ar);
+                collide = true;
+            }
+        }
+
+
+        if (collide) {
+            detected = true;
+        }
+    }
+
+    outer:
+
+    ball_p += ball_v * dt;
+
+    for (std::size_t i = 0; i < holes.size(); ++i) {
+        if ((holes[i] - ball_p).norm() > ball_r) continue;
+
+        falling = true;
+        falling_hole = i;
+        falling_distance = ball_r;
+        Eigen::Vector2d rp = ball_p - holes[i];
+        falling_angle = std::atan2(rp(1), rp(0));
+        Eigen::Vector2d rv = ProjectVector(ball_v, ball_p, holes[i]);
+        falling_rv = rv.norm();
+        Eigen::Vector2d av = ball_v - rv;
+        falling_av = (rp(0) * av(1) - rp(1) * av(0)) / rp.dot(rp);
+
+        break;
+    }
+}
+
+Eigen::Affine3f GetBoardMatrix() {
+    Eigen::Affine3f tran = Eigen::Affine3f::Identity();
+    tran = Eigen::Scaling(BoardXScale, BoardYScale, BoardZScale) * tran;
+    tran = Eigen::Translation3f(0, 0, -BoardZScale ) * tran;
+    return tran;
+}
+
+Eigen::Affine3f GetGlobalMatrix() {
+    Eigen::Vector2d axis = tilt.normalized();
+    return Eigen::Translation3f(0, 0, -BoardZScale) *
+    Eigen::AngleAxisd(tilt.norm(), Eigen::Vector3d(-axis(1), axis(0), 0.0)).cast<float>()
+         * Eigen::Translation3f(0, 0, BoardZScale);
+}
+
 int main(void)
 {
     GLFWwindow* window;
@@ -227,7 +511,7 @@ int main(void)
 #endif
 
     // Create a windowed mode window and its OpenGL context
-    window = glfwCreateWindow(500, 500, "Hello World", NULL, NULL);
+    window = glfwCreateWindow(1000, 1000, "Hello World", NULL, NULL);
     if (!window)
     {
         glfwTerminate();
@@ -257,106 +541,11 @@ int main(void)
     printf("Supported OpenGL is %s\n", (const char*)glGetString(GL_VERSION));
     printf("Supported GLSL is %s\n", (const char*)glGetString(GL_SHADING_LANGUAGE_VERSION));
 
-    // Initialize the OpenGL Program
-    // A program controls the OpenGL pipeline and it must contains
-    // at least a vertex shader and a fragment shader to be valid
-    Program program;
-    const GLchar* vertex_shader = R"(
-#version 150 core
 
-uniform vec3 obj_color;
-uniform vec3 camera_pos;
-uniform mat4 obj_tran;
-uniform mat4 inv_obj;
-uniform mat4 camera_tran;
-
-out vec3 vert_color;
-out vec3 e; // ray origin in object space
-out vec3 d; // ray direction in objct space
-
-const vec3 ijk[3] = vec3[3](vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 1.0));
-
-void main()
-{
-    int face = gl_VertexID / 6;
-    int in_face_id = gl_VertexID % 6;
-    int axis = face / 2;
-    float negate = 2.0 * (0.5 - float(face % 2));
-
-    vec3 perm[3] = vec3[3](
-        ijk[axis], ijk[(axis + 1) % 3], ijk[(axis + 2) % 3]
-    );
-
-    vec3 position;
-    if (in_face_id == 0 || in_face_id == 3) {
-        position = (perm[0] + perm[1] + perm[2]) * negate;
-    } else if (in_face_id == 1) {
-        position = perm[0] * negate - perm[1] + perm[2];
-    } else if (in_face_id == 2 || in_face_id == 4) {
-        position = (perm[0] - perm[1] - perm[2]) * negate;
-    } else if (in_face_id == 5) {
-        position = perm[0] * negate + perm[1] - perm[2];
-    }
-
-    e = (inv_obj * vec4(camera_pos, 1.0)).xyz;
-    d = position - e;
-
-    vert_color = obj_color;
-
-    vec4 world_pos = obj_tran * vec4(position, 1.0);
-    vec4 proj_pos = camera_tran * world_pos;
-
-    gl_Position = proj_pos;
-}
-)";
-    const GLchar* fragment_shader = R"(
-#version 150 core
-
-in vec3 vert_color;
-in vec3 e;
-in vec3 d;
-
-out vec4 outColor;
-
-uniform vec3 camera_pos;
-uniform mat4 obj_tran;
-uniform mat4 inv_obj;
-uniform mat4 camera_tran;
-
-const vec3 light_source = vec3(10.0, 10.0, 10.0);
-
-void main()
-{
-    float a = dot(d, d);
-    float b = 2 * dot(d, e);
-    float c = dot(e, e) - 1;
-    float det = b * b - 4 * a * c;
-    if (det < 0.0)
-        discard;
-
-    float t = (-b - sqrt(det)) / (2.0 * a);
-    if (t < 0.0)
-        discard;
-
-    vec3 p = e + d * t;
-
-    vec4 p_world = obj_tran * vec4(p, 1.0);
-    vec4 n_world = transpose(inv_obj) * vec4(p, 0.0);
-    vec4 p_proj = camera_tran * p_world;
-    gl_FragDepth = p_proj.z / p_proj.w * 0.5 + 0.5;
-
-    vec3 v = normalize(camera_pos - p_world.xyz);
-    vec3 l = normalize(light_source - p_world.xyz);
-    vec3 n = normalize(n_world.xyz);
-    vec3 h = normalize(l + v);
-    vec3 diffuse = vert_color * 0.8 * max(0.0, dot(n, l));
-    vec3 specular = vert_color * pow(max(0.0, dot(n, h)), 50);
-    outColor = vec4(clamp(diffuse + specular + vert_color * 0.05, 0.0, 1.0), 1.0);
-}
-)";
-
-    program.init(vertex_shader,fragment_shader,"outColor");
-    program.bind();
+    Program sphere_program = SphereProgram();
+    Program cylinder_program = CylinderProgram();
+    Program box_program = BoxProgram();
+    Program disk_program = DiskProgram();
 
     VertexArrayObject vao;
     vao.init();
@@ -372,25 +561,80 @@ void main()
     // Register the mouse callback
     glfwSetMouseButtonCallback(window, mouse_button_callback);
 
+    glfwSetCursorPosCallback(window, move_callback);
+
     // Update viewport
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
 
     glEnable(GL_DEPTH_TEST);
 
-    int uniform_vert_color = program.uniform("obj_color");
-    int uniform_obj_tran = program.uniform("obj_tran");
-    int uniform_camera_tran = program.uniform("camera_tran");
-    int uniform_inv_obj = program.uniform("inv_obj");
-    int uniform_camera_pos = program.uniform("camera_pos");
+
+    int x,y,n;
+    unsigned char *data = stbi_load("wood.png", &x, &y, &n, 4);
+    if (!data) {
+        printf("failed to load wood texture file\n");
+        return -1;
+    }
+    GLuint wood;
+    glGenTextures(1, &wood);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, wood);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, x, y, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    stbi_image_free(data);
+
+    data = stbi_load("check.png", &x, &y, &n, 4);
+    if (!data) {
+        printf("failed to load check texture file\n");
+        return -1;
+    }
+    GLuint check;
+    glGenTextures(1, &check);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, check);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, x, y, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    stbi_image_free(data);
+
+    int sphere_vert_color = sphere_program.uniform("obj_color");
+    int sphere_obj_tran = sphere_program.uniform("obj_tran");
+    int sphere_camera_tran = sphere_program.uniform("camera_tran");
+    int sphere_inv_obj = sphere_program.uniform("inv_obj");
+    int sphere_camera_pos = sphere_program.uniform("camera_pos");
+
+    int cylinder_vert_color = cylinder_program.uniform("obj_color");
+    int cylinder_obj_tran = cylinder_program.uniform("obj_tran");
+    int cylinder_camera_tran = cylinder_program.uniform("camera_tran");
+    int cylinder_inv_obj = cylinder_program.uniform("inv_obj");
+    int cylinder_camera_pos = cylinder_program.uniform("camera_pos");
+
+    int box_obj_tran = box_program.uniform("obj_tran");
+    int box_camera_tran = box_program.uniform("camera_tran");
+    int box_camera_pos = box_program.uniform("camera_pos");
+    int box_texture = box_program.uniform("box_texture");
+    int box_tex_seed = box_program.uniform("tex_seed");
+
+    int disk_obj_tran = disk_program.uniform("obj_tran");
+    int disk_camera_tran = disk_program.uniform("camera_tran");
+    int disk_texture = disk_program.uniform("disk_texture");
 
     glEnable(GL_CULL_FACE);
+    glFrontFace(GL_CW);
     glCullFace(GL_BACK);
+
+    glEnable(GL_STENCIL_TEST);
+
+    AddEdges();
 
     // Loop until the user closes the window
     while (!glfwWindowShouldClose(window))
     {
-        // Bind your program
-        program.bind();
 
         // Set the uniform value depending on the time difference
         auto t_now = std::chrono::high_resolution_clock::now();
@@ -403,6 +647,8 @@ void main()
 
         // limit frame rate;
         std::this_thread::sleep_until(key_t_prev + key_sample_period);
+
+        StepFrame();
 
         if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) {
             camera_theta += 0.03f;
@@ -425,12 +671,12 @@ void main()
         }
 
         if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS) {
-            camera_r -= 0.03f;
+            camera_r -= 0.2f;
             camera_r = std::max(camera_r, 0.1f);
         }
 
         if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS) {
-            camera_r += 0.03f;
+            camera_r += 0.2f;
         }
 
 
@@ -502,26 +748,104 @@ void main()
         // Clear the framebuffer
         glClearColor(0.5f, 0.5f, 0.5f, 1.0f);
         glClearDepth(1.0f);
-        glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+        glClearStencil(0);
+        glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT|GL_STENCIL_BUFFER_BIT);
 
         Eigen::Projective3f camera_tran = GetCameraMatrix();
         Eigen::Vector3f camera_pos = GetCameraPos();
 
-        glUniformMatrix4fv(uniform_camera_tran, 1, GL_FALSE, camera_tran.data());
-        glUniform3fv(uniform_camera_pos, 1, camera_pos.data());
+        disk_program.bind();
+        glUniformMatrix4fv(disk_camera_tran, 1, GL_FALSE, camera_tran.data());
 
-        for (std::size_t i = 0; i < objects.size(); ++i) {
-            auto& object = objects[i];
-
-            Eigen::Projective3f obj_tran = object.translate * object.linear;
-            glUniformMatrix4fv(uniform_obj_tran, 1, GL_FALSE, obj_tran.data());
-
-            Eigen::Projective3f inv = obj_tran.inverse();
-            glUniformMatrix4fv(uniform_inv_obj, 1, GL_FALSE, inv.data());
-
-            glUniform3fv(uniform_vert_color, 1, object.color.data());
-            glDrawArrays(GL_TRIANGLES, 0, 36);
+        glStencilFunc(GL_ALWAYS, 1, 0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+        glStencilMask(0xFF);
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        glDepthMask(GL_FALSE);
+        for (auto& hole : holes) {
+            glUniformMatrix4fv(disk_obj_tran, 1, GL_FALSE,
+                (GetGlobalMatrix() *
+                Eigen::Translation3f((float)hole(0), (float)hole(1), 0.0f) *
+                Eigen::Scaling((float)ball_r, (float)ball_r, 1.0f)).data()
+            );
+            glDrawArrays(GL_TRIANGLES, 0, 6); // holes
         }
+
+
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glDepthMask(GL_TRUE);
+
+        box_program.bind();
+
+        glUniform1i(box_texture, 0);
+
+        glUniformMatrix4fv(box_camera_tran, 1, GL_FALSE, camera_tran.data());
+        glUniform3fv(box_camera_pos, 1, camera_pos.data());
+
+        glUniform1f(box_tex_seed, 0.0);
+        glUniformMatrix4fv(box_obj_tran, 1, GL_FALSE, (GetGlobalMatrix() * GetBoardMatrix()).data());
+        glStencilFunc(GL_EQUAL, 0, 0xFF);
+        glDrawArrays(GL_TRIANGLES, 0, 36); // main board
+
+        glStencilFunc(GL_ALWAYS, 0, 0);
+
+        cylinder_program.bind();
+
+        glUniformMatrix4fv(cylinder_camera_tran, 1, GL_FALSE, camera_tran.data());
+        glUniform3fv(cylinder_camera_pos, 1, camera_pos.data());
+        Eigen::Vector3f color{0.5f, 0.3f, 0.0f};
+        glUniform3fv(cylinder_vert_color, 1, color.data());
+        for (auto& hole : holes) {
+            Eigen::Affine3f obj_tran = (GetGlobalMatrix() *
+                Eigen::Translation3f((float)hole(0), (float)hole(1), -BoardZScale) *
+                Eigen::Scaling((float)ball_r, (float)ball_r, BoardZScale));
+
+            Eigen::Affine3f inv_obj = obj_tran.inverse();
+            glUniformMatrix4fv(cylinder_obj_tran, 1, GL_FALSE, obj_tran.data());
+            glUniformMatrix4fv(cylinder_inv_obj, 1, GL_FALSE, inv_obj.data());
+            glDrawArrays(GL_TRIANGLES, 0, 36); // holes wall
+        }
+
+        disk_program.bind();
+        glUniformMatrix4fv(disk_camera_tran, 1, GL_FALSE, camera_tran.data());
+        glUniform1i(disk_texture, 1); // the first one uses checker board
+        for (auto& hole : holes) {
+            glUniformMatrix4fv(disk_obj_tran, 1, GL_FALSE,
+                (GetGlobalMatrix() *
+                Eigen::Translation3f((float)hole(0), (float)hole(1), -2 * BoardZScale) *
+                Eigen::Scaling((float)ball_r, (float)ball_r, 1.0f)).data()
+            );
+            glDrawArrays(GL_TRIANGLES, 0, 6); // hole bottom
+
+            glUniform1i(disk_texture, 0); // others uses wood
+        }
+
+        box_program.bind();
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, wood);
+        glUniform1i(box_texture, 0);
+
+        for (std::size_t i = 0; i< boxes.size(); ++i) {
+            glUniform1f(box_tex_seed, boxes[i].x_pos * boxes[i].y_pos);
+            glUniformMatrix4fv(box_obj_tran, 1, GL_FALSE, (GetGlobalMatrix() * boxes[i].GetMatrix()).data());
+            glDrawArrays(GL_TRIANGLES, 0, 36); // blocks
+        }
+
+
+        sphere_program.bind();
+        glUniformMatrix4fv(sphere_camera_tran, 1, GL_FALSE, camera_tran.data());
+        glUniform3fv(sphere_camera_pos, 1, camera_pos.data());
+
+        Eigen::Projective3f ball_tran = GetGlobalMatrix() * GetBallMatrix();
+        glUniformMatrix4fv(sphere_obj_tran, 1, GL_FALSE, ball_tran.data());
+
+        Eigen::Projective3f inv = ball_tran.inverse();
+        glUniformMatrix4fv(sphere_inv_obj, 1, GL_FALSE, inv.data());
+
+        Eigen::Vector3f ball_color{0.8f, 0.8f, 0.8f};
+        glUniform3fv(sphere_vert_color, 1, ball_color.data());
+        glDrawArrays(GL_TRIANGLES, 0, 36);
 
         // Swap front and back buffers
         glfwSwapBuffers(window);
@@ -531,7 +855,7 @@ void main()
     }
 
     // Deallocate opengl memory
-    program.free();
+    sphere_program.free();
     vao.free();
 
     // Deallocate glfw internals
