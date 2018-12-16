@@ -65,8 +65,21 @@ uniform vec3 camera_pos;
 uniform mat4 obj_tran;
 uniform mat4 inv_obj;
 uniform mat4 camera_tran;
+uniform vec3 light_source;
+uniform sampler2D shadow;
+uniform mat4 shadow_tran;
 
-const vec3 light_source = vec3(10.0, 10.0, 10.0);
+vec2 shadow_dev[9] = vec2[](
+  vec2(0.0, 0.0),
+  vec2(-1.0, 0.0),
+  vec2(1.0, 0.0),
+  vec2(0.0, 1.0),
+  vec2(0.0, -1.0),
+  vec2(-1.0, 1.0),
+  vec2(1.0, 1.0),
+  vec2(-1.0, -1.0),
+  vec2(1.0, -1.0)
+);
 
 void main()
 {
@@ -86,6 +99,10 @@ void main()
     vec4 p_world = obj_tran * vec4(p, 1.0);
     vec4 n_world = transpose(inv_obj) * vec4(p, 0.0);
     vec4 p_proj = camera_tran * p_world;
+    vec4 p_shadow = shadow_tran * p_world;
+    p_shadow /= p_shadow.w;
+    p_shadow *= 0.5;
+    p_shadow += vec4(0.5, 0.5, 0.5, 0.5);
     gl_FragDepth = p_proj.z / p_proj.w * 0.5 + 0.5;
 
     vec3 v = normalize(camera_pos - p_world.xyz);
@@ -94,7 +111,16 @@ void main()
     vec3 h = normalize(l + v);
     vec3 diffuse = vert_color * 0.8 * max(0.0, dot(n, l));
     vec3 specular = vert_color * pow(max(0.0, dot(n, h)), 50);
-    outColor = vec4(clamp(diffuse + specular + vert_color * 0.05, 0.0, 1.0), 1.0);
+    vec3 amb = vert_color * 0.2;
+
+    float shadow_coef = 1.0;
+    for (int i = 0; i < 9; ++i) {
+        if (texture(shadow, p_shadow.xy + shadow_dev[i] / 1024.0).x < (p_shadow.z - 0.0004)) {
+            shadow_coef -= 1.0 / 9;
+        }
+    }
+
+    outColor = vec4(clamp((diffuse + specular) * shadow_coef + amb, 0.0, 1.0), 1.0);
 }
 )";
 
