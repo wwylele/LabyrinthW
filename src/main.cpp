@@ -405,7 +405,7 @@ int main(void)
 #endif
 
     // Create a windowed mode window and its OpenGL context
-    window = glfwCreateWindow(1000, 1000, "Hello World", NULL, NULL);
+    window = glfwCreateWindow(1000, 1000, "Labyrinth", NULL, NULL);
     if (!window)
     {
         glfwTerminate();
